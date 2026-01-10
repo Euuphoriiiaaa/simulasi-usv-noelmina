@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simulasi USV Noelmina - Cloud Research</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@r128/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <script>
+        const SUPABASE_URL = 'https://gzodaecbzkmjxnjlteai.supabase.co';
+        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd6b2RhZWNiemttanhuamx0ZWFpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgwMzkxOTYsImV4cCI6MjA4MzYxNTE5Nn0.JV5Zo4oRz0EbnfnpAYF2mHCLkAbqEop_H9ceN09KUBI'; 
+        const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    </script>
+    
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; background: #0f172a; }
+        canvas { display: block; position: absolute; top: 0; left: 0; }
+        #ui-panel { 
+            position: absolute; top: 20px; left: 20px; width: 340px; z-index: 100; 
+            background: rgba(255,255,255,0.98); padding: 24px; border-radius: 16px; 
+            box-shadow: 0 10px 40px rgba(0,0,0,0.6); backdrop-filter: blur(12px);
+            border: 1px solid rgba(255,255,255,0.4);
+        }
+        .btn-usv { @apply w-full text-white py-2 rounded-lg font-bold mb-2 active:scale-95 transition-all shadow-md disabled:opacity-50; }
+    </style>
+</head>
+<body>
+
+<div id="ui-panel">
+    <h2 class="text-xl font-bold mb-1 text-blue-900 text-center uppercase">Riset Navigasi USV</h2>
+    <p class="text-[10px] text-gray-500 mb-4 uppercase text-center">High Density Obstacle Mode</p>
+    
+    <div class="mb-4">
+        <label class="block text-xs font-bold text-gray-700 mb-1">Skenario Navigasi</label>
+        <select id="scenario-select" class="w-full p-2 text-sm border border-gray-300 rounded-lg outline-none">
+            <option value="Skenario 1: Alur Bersih">Skenario 1: Alur Bersih</option>
+            <option value="Skenario 2: Sampah Melayang">Skenario 2: Sampah (Sangat Banyak)</option>
+            <option value="Skenario 3: Batang Kayu">Skenario 3: Kayu (Sangat Banyak)</option>
+        </select>
+    </div>
+
+    <div class="space-y-1 mb-4">
+        <button id="btn-usv1" class="btn-usv bg-red-600">TEST USV 1 (Noelmina)</button>
+        <button id="btn-usv2" class="btn-usv bg-purple-600">TEST USV 2 (Linamnutu)</button>
+        <button id="btn-usv3" class="btn-usv bg-blue-600">TEST USV 3 (Oemolo)</button>
+    </div>
+
+    <div class="bg-blue-50 p-3 rounded-xl border border-blue-100 mb-4">
+        <div class="flex justify-between items-center">
+            <span class="text-xs font-bold text-blue-800">DATA TERCATAT:</span>
+            <span id="run-count-text" class="text-lg font-black text-blue-900">0</span>
+        </div>
+    </div>
+
+    <button id="download-btn" class="w-full bg-emerald-600 text-white py-3 rounded-xl text-sm font-bold hidden shadow-md">📥 DOWNLOAD DATA (EXCEL)</button>
+    
+    <div id="status-msg" class="mt-4 text-[11px] text-blue-900 font-mono bg-blue-50 p-3 rounded-xl border border-blue-100 text-center">
+        Status: Menunggu Inisialisasi...
+    </div>
+</div>
+
+<script>
+    const MAP_URL = 'Peta Noelmina.png'; 
+    const GRID_SIZE = 200; 
+    const WORLD_SCALE = 10; 
+    const WORLD_SIZE = GRID_SIZE * WORLD_SCALE;
+    const LAND_ELEVATION = 20; 
+
+    const COST_PATH = 1;      
+    const COST_OBSTACLE = 200; 
+    const COST_LAND = 999999;     
+
+    let startGrid = { x: 142, y: 186 }; 
+    let destinationGrids = [
+        { id: 1, name: "Desa Noelmina", x: 75, y: 100, color: 0xef4444 },
+        { id: 2, name: "Desa Linamnutu", x: 110, y: 115, color: 0x8b5cf6 },
+        { id: 3, name: "Desa Oemolo", x: 95, y: 135, color: 0x3b82f6 },
+    ];
+
+    let scene, camera, renderer, controls, activeUSV = null;
+    let isSimulating = false, startTime, totalDuration = 40000;
+    let baseGridData = [], currentGridData = [], obstacleMesh = null;
+    let pathLines = [], sessionData = [], totalLogged = 0;
+
+    class Node {
+        constructor(x, y, cost, parent = null) {
+            this.x = x; this.y = y; this.cost = cost;
+            this.g = 0; this.h = 0; this.f = 0; this.parent = parent;
+        }
+    }
+
+    function findPath(start, end, grid) {
+        const t0 = performance.now();
+        let openSet = [new Node(start.x, start.y, grid[start.x][start.y])];
+        let closedSet = new Set();
+        const getKey = (x, y) => `${x},${y}`;
+
+        while (openSet.length > 0) {
+            openSet.sort((a, b) => a.f - b.f);
+            let current = openSet.shift();
+            if (current.x === end.x && current.y === end.y) {
+                let path = []; let length = 0; let temp = current;
+                while (temp) { 
+                    path.push({ x: temp.x, y: temp.y }); 
+                    if(temp.parent) length += Math.sqrt(Math.pow(temp.x - temp.parent.x, 2) + Math.pow(temp.y - temp.parent.y, 2));
+                    temp = temp.parent; 
+                }
+                return { path: path.reverse(), pathLength: length * WORLD_SCALE, computeTime: performance.now() - t0, success: true };
+            }
+            closedSet.add(getKey(current.x, current.y));
+            [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]].forEach(([dx, dy]) => {
+                let nx = current.x + dx, ny = current.y + dy;
+                if (nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE || grid[nx][ny] >= COST_LAND || closedSet.has(getKey(nx, ny))) return;
+                
+                let dynamicCost = grid[nx][ny] + (Math.random() * 0.4);
+                let g = current.g + (Math.sqrt(dx*dx + dy*dy) * dynamicCost);
+                
+                if (!openSet.find(o => o.x === nx && o.y === ny && o.g <= g)) {
+                    let n = new Node(nx, ny, grid[nx][ny], current);
+                    n.g = g; n.h = Math.sqrt((nx-end.x)**2 + (ny-end.y)**2);
+                    n.f = n.g + n.h; openSet.push(n);
+                }
+            });
+        }
+        return { success: false };
+    }
+
+    function generateObstacles(scenario) {
+    // 1. Bersihkan rintangan lama
+    if (obstacleMesh) { scene.remove(obstacleMesh); obstacleMesh = null; }
+    
+    // 2. Reset data grid navigasi
+    currentGridData = JSON.parse(JSON.stringify(baseGridData));
+    
+    // 3. Jika skenario "Alur Bersih", berhenti di sini
+    if (scenario === 'Skenario 1: Alur Bersih') return;
+
+    let obsPos = [];
+    
+    // 4. JUMLAH RINTANGAN (Ditingkatkan agar sangat banyak & menyebar)
+    // Sampah: 2000 unit, Kayu: 1600 unit (Sangat padat untuk grid 200)
+    let maxCount = (scenario === 'Skenario 2: Sampah Melayang') ? 2000 : 1600;
+    
+    // 5. UKURAN (Kayu diperkecil sesuai permintaan: 5 unit panjang, 0.8 unit tebal)
+    let geo = (scenario === 'Skenario 2: Sampah Melayang') ? 
+              new THREE.SphereGeometry(1.2, 8, 8) : 
+              new THREE.BoxGeometry(5, 0.8, 0.8); 
+    
+    let mat = new THREE.MeshPhongMaterial({ 
+        color: (scenario === 'Skenario 2: Sampah Melayang') ? 0xffffff : 0x5d4037 
+    });
+    
+    // 6. LOOP PENYEBARAN
+    for (let i = 0; i < maxCount; i++) {
+        let rx = Math.floor(Math.random() * GRID_SIZE);
+        let ry = Math.floor(Math.random() * GRID_SIZE);
+        
+        // Pengecekan agar tidak menutupi titik Target (Desa)
+        let isNearTarget = false;
+        destinationGrids.forEach(d => { 
+            if(Math.abs(rx - d.x) < 3 && Math.abs(ry - d.y) < 3) isNearTarget = true; 
+        });
+
+        // Syarat Penempatan:
+        // - Harus di Air (COST_PATH)
+        // - Bukan di titik Start kapal (Muara)
+        // - Bukan tepat di titik Target (Pelabuhan)
+        if (baseGridData[rx][ry] === COST_PATH && 
+            Math.abs(rx - startGrid.x) > 7 && 
+            !isNearTarget) {
+            
+            currentGridData[rx][ry] = COST_OBSTACLE;
+            obsPos.push({x: rx, y: ry});
+        }
+    }
+
+    // 7. Render InstancedMesh (Performa stabil meski rintangan ribuan)
+    obstacleMesh = new THREE.InstancedMesh(geo, mat, obsPos.length);
+    const dummy = new THREE.Object3D();
+    obsPos.forEach((p, i) => {
+        const w = gridToWorld(p.x, p.y);
+        dummy.position.set(w.x, 1, w.z); 
+        // Kayu diputar acak agar menyebar alami melintang di sungai
+        if (scenario === 'Skenario 3: Batang Kayu') dummy.rotation.y = Math.random() * Math.PI;
+        dummy.updateMatrix();
+        obstacleMesh.setMatrixAt(i, dummy.matrix);
+    });
+    
+    scene.add(obstacleMesh);
+}
+    async function processTerrain() {
+        return new Promise((resolve) => {
+            const img = new Image(); img.crossOrigin = "anonymous"; img.src = MAP_URL;
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = GRID_SIZE; canvas.height = GRID_SIZE;
+                const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, GRID_SIZE, GRID_SIZE);
+                const pixels = ctx.getImageData(0, 0, GRID_SIZE, GRID_SIZE).data;
+                const grid = Array(GRID_SIZE).fill(0).map(() => Array(GRID_SIZE).fill(COST_LAND));
+                const geo = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, GRID_SIZE - 1, GRID_SIZE - 1);
+                geo.rotateX(-Math.PI / 2);
+                const pos = geo.attributes.position;
+                for (let i = 0; i < pixels.length; i += 4) {
+                    const r = pixels[i], g = pixels[i+1], b = pixels[i+2];
+                    const x = (i/4)%GRID_SIZE, y = Math.floor((i/4)/GRID_SIZE);
+                    let isWater = (b > r + 35 && b > g + 30);
+                    // Force Water: Menjamin titik krusial tidak terblokir warna hijau
+                    if (Math.abs(x - startGrid.x) < 4 && Math.abs(y - startGrid.y) < 4) isWater = true;
+                    destinationGrids.forEach(d => { if (Math.abs(x - d.x) < 3 && Math.abs(y - d.y) < 3) isWater = true; });
+
+                    if (isWater) { grid[x][y] = COST_PATH; pos.setY(i/4, 0); }
+                    else { pos.setY(i/4, LAND_ELEVATION); }
+                }
+                pos.needsUpdate = true; geo.computeVertexNormals();
+                scene.add(new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ map: new THREE.TextureLoader().load(MAP_URL) })));
+                document.getElementById('status-msg').innerText = "Status: Siap Simulasi.";
+                resolve(grid);
+            };
+        });
+    }
+
+    function runTest(id) {
+        if (activeUSV) scene.remove(activeUSV);
+        pathLines.forEach(l => scene.remove(l)); pathLines = [];
+        generateObstacles(document.getElementById('scenario-select').value);
+        
+        const dest = destinationGrids.find(d => d.id === id);
+        activeUSV = new THREE.Group();
+        activeUSV.add(new THREE.Mesh(new THREE.BoxGeometry(4, 2, 8), new THREE.MeshPhongMaterial({ color: dest.color })));
+        const s = gridToWorld(startGrid.x, startGrid.y);
+        activeUSV.position.set(s.x, 8, s.z);
+        activeUSV.userData = { id, target: dest, path: [] };
+        scene.add(activeUSV);
+
+        const res = findPath(startGrid, dest, currentGridData);
+        if (res.success) {
+            activeUSV.userData.path = res.path; activeUSV.userData.stats = res;
+            const pts = res.path.map(n => { const w = gridToWorld(n.x, n.y); return new THREE.Vector3(w.x, 35, w.z); });
+            const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: dest.color }));
+            scene.add(line); pathLines.push(line);
+            startTime = performance.now(); isSimulating = true;
+            document.querySelectorAll('.btn-usv').forEach(b => b.disabled = true);
+            document.getElementById('status-msg').innerText = `Running Test USV ${id}...`;
+        } else {
+            document.getElementById('status-msg').innerText = "ERROR: Jalur Terhalang Tebing/Rintangan!";
+        }
+    }
+
+    function gridToWorld(x, y) { return { x: x * WORLD_SCALE - WORLD_SIZE/2, z: y * WORLD_SCALE - WORLD_SIZE/2 }; }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        if (isSimulating && activeUSV) {
+            const progress = Math.min((performance.now() - startTime) / totalDuration, 1);
+            const path = activeUSV.userData.path; if (!path.length) return;
+            const idx = Math.floor(progress * (path.length - 1));
+            const p1 = gridToWorld(path[idx].x, path[idx].y), p2 = gridToWorld(path[Math.min(idx+1, path.length-1)].x, path[Math.min(idx+1, path.length-1)].y);
+            activeUSV.position.x = p1.x + (p2.x - p1.x) * (progress * (path.length - 1) % 1);
+            activeUSV.position.z = p1.z + (p2.z - p1.z) * (progress * (path.length - 1) % 1);
+            activeUSV.position.y = 8; activeUSV.lookAt(p2.x, 8, p2.z);
+            if (progress >= 1) { isSimulating = false; finishTest(); }
+        }
+        renderer.render(scene, camera);
+    }
+
+    async function finishTest() {
+    const u = activeUSV.userData;
+    
+    // Siapkan data untuk dikirim ke Cloud
+    const researchData = {
+        usv_id: u.id,
+        target: u.target.name,
+        skenario: document.getElementById('scenario-select').value,
+        komputasi_ms: parseFloat(u.stats.computeTime.toFixed(4)),
+        jarak_m: parseFloat(u.stats.pathLength.toFixed(2))
+    };
+
+    // KIRIM KE CLOUD (SUPABASE)
+    const { error } = await _supabase.from('simulasi_usv').insert([researchData]);
+    
+    if (error) {
+        console.error("Gagal kirim ke Cloud:", error.message);
+    } else {
+        console.log("Data berhasil tersimpan di Cloud Supabase!");
+    }
+
+    // Tetap simpan di log lokal (Excel)
+    totalLogged++;
+    document.getElementById('run-count-text').innerText = totalLogged;
+    sessionData.push({ "Iterasi": totalLogged, ...researchData });
+    
+    document.getElementById('status-msg').innerText = `Test Selesai. Data ke-${totalLogged} tercatat di Cloud.`;
+    document.querySelectorAll('.btn-usv').forEach(b => b.disabled = false);
+    document.getElementById('download-btn').classList.remove('hidden');
+}
+
+    document.getElementById('btn-usv1').onclick = () => runTest(1);
+    document.getElementById('btn-usv2').onclick = () => runTest(2);
+    document.getElementById('btn-usv3').onclick = () => runTest(3);
+
+    document.getElementById('download-btn').onclick = () => {
+        const ws = XLSX.utils.json_to_sheet(sessionData);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Log");
+        XLSX.writeFile(wb, "Riset_USV_Final.xlsx");
+    };
+
+    async function init() {
+        scene = new THREE.Scene(); scene.background = new THREE.Color(0x0f172a);
+        renderer = new THREE.WebGLRenderer({ antialias: true }); renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 15000);
+        camera.position.set(-1100, 1100, 0); controls = new THREE.OrbitControls(camera, renderer.domElement);
+        scene.add(new THREE.AmbientLight(0xffffff, 1));
+        baseGridData = await processTerrain();
+        animate();
+    }
+    init();
+</script>
+</body>
+</html>
